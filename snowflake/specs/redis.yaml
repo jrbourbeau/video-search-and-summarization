@@ -1,0 +1,32 @@
+spec:
+  containers:
+    - name: redis
+      image: /vss_db/vss_schema/vss_images/redis:8.2.2-alpine
+      command:
+        - redis-server
+        - --bind
+        - 0.0.0.0
+        - --port
+        - "6379"
+        - --save
+        - ""
+        - --appendonly
+        - "no"
+      readinessProbe:
+        exec:
+          command:
+            - redis-cli
+            - ping
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "0.5"
+        limits:
+          memory: "512Mi"
+          cpu: "1"
+  endpoints:
+    - name: redis
+      port: 6379
+      protocol: TCP

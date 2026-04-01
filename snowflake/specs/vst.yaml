@@ -1,0 +1,267 @@
+# Snowpark Container Services spec for the Video Storage Toolkit (VST).
+#
+# This spec runs a multi-container "pod" containing all VST components:
+#   - postgres:       Central database for VST metadata
+#   - sensor-ms:      Main VST service - handles video ingest, storage, clip generation
+#   - streamprocessing-ms: Video stream processing (transcoding, RTSP)
+#   - envoy-proxy:    Static HTTP proxy routing to streamprocessing-ms (replaces SDR-managed dynamic config)
+#   - vst-ingress:    Nginx reverse proxy (public API at port 30888)
+#   - vst-mcp:        MCP gateway (for agent tool access at port 8001)
+#
+# NOTE: The SDR (Service Discovery and Routing) component from the original Docker Compose
+# deployment is NOT included here because it requires mounting /var/run/docker.sock,
+# which is incompatible with SPCS. For RTSP stream management (live camera feeds), SDR
+# is required and cannot run in SPCS. File upload-based video analysis works without it.
+#
+# All containers share localhost networking (same network namespace in SPCS).
+# Config files are mounted from the @VSS_CONFIGS Snowflake stage.
+#
+# This service requires a GPU compute pool (VSS_GPU_POOL) for video processing.
+
+spec:
+  containers:
+
+    # -------------------------------------------------------------------------
+    # PostgreSQL - VST central database
+    # -------------------------------------------------------------------------
+    - name: postgres
+      image: /vss_db/vss_schema/vss_images/postgres:17.6-alpine
+      env:
+        POSTGRES_USER: vst
+        POSTGRES_DB: nvcentralizedb
+        POSTGRES_HOST_AUTH_METHOD: trust
+      command:
+        - postgres
+        - -c
+        - config_file=/etc/postgresql/postgresql.conf
+        - -c
+        - unix_socket_directories=/var/run/vst
+      readinessProbe:
+        exec:
+          command:
+            - pg_isready
+            - -U
+            - vst
+            - -d
+            - nvcentralizedb
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 60
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "0.5"
+        limits:
+          memory: "1Gi"
+          cpu: "1"
+      volumeMounts:
+        - name: vst-configs
+          mountPath: /etc/postgresql
+          subPath: vst/configs
+        - name: vst-data
+          mountPath: /var/lib/postgresql/data
+          subPath: postgres/db
+        - name: vst-run
+          mountPath: /var/run/vst
+
+    # -------------------------------------------------------------------------
+    # VST Sensor MS - main video storage service
+    # -------------------------------------------------------------------------
+    - name: sensor-ms
+      image: /vss_db/vss_schema/vss_images/vss-vios-sensor:3.1.0
+      env:
+        ADAPTOR: vst_rtsp
+        NEED_RECORDING: "false"
+        NEED_RTSPSERVER: "false"
+        NEED_STORAGE: "false"
+        NEED_STREAM_MONITORING: "true"
+        HTTP_PORT: "30000"
+        CENTRALIZE_DB_NAME: nvcentralizedb
+        CENTRALIZE_DB_USERNAME: vst
+        STREAM_PROCESSOR_MODULE_ENDPOINT: http://localhost:10000
+      readinessProbe:
+        port: 30000
+        initialDelaySeconds: 15
+        periodSeconds: 10
+        failureThreshold: 20
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "2"
+          nvidia.com/gpu: 1
+        limits:
+          memory: "4Gi"
+          cpu: "4"
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: vst-configs
+          mountPath: /home/vst/vst_release/configs
+          subPath: vst/configs
+        - name: vst-data
+          mountPath: /home/vst/vst_release/vst_data
+          subPath: vst_data
+        - name: vst-video
+          mountPath: /home/vst/vst_release/vst_video
+        - name: vst-run
+          mountPath: /var/run/postgresql
+
+    # -------------------------------------------------------------------------
+    # VST Streamprocessing MS - video stream/transcoding processor
+    # -------------------------------------------------------------------------
+    - name: streamprocessing-ms
+      image: /vss_db/vss_schema/vss_images/vss-vios-streamprocessing:3.1.0
+      env:
+        VST_INSTALL_ADDITIONAL_PACKAGES: "false"
+        CONTAINER_NAME: streamprocessing-ms
+        ADAPTOR: vst_rtsp
+        HTTP_PORT: "30001"
+        RTSP_SERVER_PORT: "30554"
+        CENTRALIZE_DB_NAME: nvcentralizedb
+        CENTRALIZE_DB_USERNAME: vst
+        SENSOR_MODULE_ENDPOINT: http://localhost:30000
+        VST_INGRESS_ENDPOINT: localhost:30888/vst
+      readinessProbe:
+        port: 30001
+        initialDelaySeconds: 20
+        periodSeconds: 15
+        failureThreshold: 30
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "2"
+          nvidia.com/gpu: 1
+        limits:
+          memory: "4Gi"
+          cpu: "4"
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: vst-configs
+          mountPath: /home/vst/vst_release/configs
+          subPath: vst/configs
+        - name: vst-data
+          mountPath: /home/vst/vst_release/vst_data
+          subPath: vst_data
+        - name: vst-video
+          mountPath: /home/vst/vst_release/vst_video
+        - name: vst-clip-storage
+          mountPath: /home/vst/vst_release/streamer_videos
+        - name: vst-temp
+          mountPath: /home/vst/vst_release/webroot/temp_files
+        - name: vst-run
+          mountPath: /var/run/postgresql
+
+    # -------------------------------------------------------------------------
+    # Envoy Proxy - static HTTP proxy for streamprocessing routing
+    # (Replaces the dynamic XDS-configured envoy that depended on SDR)
+    # -------------------------------------------------------------------------
+    - name: envoy-proxy
+      image: /vss_db/vss_schema/vss_images/envoy-proxy:3.1.0
+      command:
+        - /usr/local/bin/envoy
+        - -c
+        - /etc/envoy/envoy.yaml
+        - --concurrency
+        - "4"
+        - --base-id
+        - "1"
+      env:
+        WDM_WL_OBJECT_NAME: streamprocessing-ms
+        ENVOYROUTEHEADER: streamid
+        NOHEADERTARGETCONTAINER: streamprocessing-ms-1
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "0.5"
+        limits:
+          memory: "512Mi"
+          cpu: "1"
+      volumeMounts:
+        - name: vst-configs
+          mountPath: /etc/envoy/envoy.yaml
+          subPath: vst/envoy-spcs.yaml
+
+    # -------------------------------------------------------------------------
+    # VST Ingress (Nginx) - public-facing reverse proxy
+    # -------------------------------------------------------------------------
+    - name: vst-ingress
+      image: /vss_db/vss_schema/vss_images/vss-vios-ingress:3.1.0
+      env:
+        HOST_IP: "127.0.0.1"
+        EXTERNAL_IP: "127.0.0.1"
+        VST_INGRESS_HTTP_PORT: "30888"
+      command:
+        - /bin/sh
+        - -c
+        - |
+          sed 's/__INTERNAL_IP__/127.0.0.1/g; s/__EXTERNAL_IP__/127.0.0.1/g' \
+            /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && \
+          exec nginx -g 'daemon off;'
+      readinessProbe:
+        port: 30888
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        failureThreshold: 30
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "0.25"
+        limits:
+          memory: "256Mi"
+          cpu: "0.5"
+      volumeMounts:
+        - name: vst-configs
+          mountPath: /etc/nginx/nginx.conf.template
+          subPath: vst/configs/nginx-vst.conf.template
+
+    # -------------------------------------------------------------------------
+    # VST MCP Gateway - MCP protocol interface for agent tool calls
+    # -------------------------------------------------------------------------
+    - name: vst-mcp
+      image: /vss_db/vss_schema/vss_images/vss-vios-mcp:3.1.0
+      env:
+        MCP_GATEWAY_CPP_API_BASE_URL: http://localhost:30888/vst
+        MCP_GATEWAY_CPP_API_TIMEOUT: "30"
+        MCP_GATEWAY_SERVER_NAME: vst-mcp-server
+        MCP_GATEWAY_SERVER_VERSION: 1.0.0
+        MCP_GATEWAY_SERVER_HOST: 0.0.0.0
+        MCP_GATEWAY_SERVER_PORT: "8001"
+        MCP_GATEWAY_LOG_LEVEL: INFO
+        MCP_GATEWAY_ENABLE_JSONRPC_LOGGING: "true"
+      readinessProbe:
+        port: 8001
+        initialDelaySeconds: 15
+        periodSeconds: 10
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "0.5"
+        limits:
+          memory: "512Mi"
+          cpu: "1"
+
+  volumes:
+    - name: vst-configs
+      source: "@vss_db.vss_schema.vss_configs"
+    - name: vst-data
+      source: local
+      size: 50Gi
+    - name: vst-video
+      source: local
+      size: 100Gi
+    - name: vst-clip-storage
+      source: local
+      size: 50Gi
+    - name: vst-temp
+      source: local
+      size: 10Gi
+    - name: vst-run
+      source: local
+      size: 1Gi
+
+  endpoints:
+    - name: api
+      port: 30888
+      public: true
+    - name: mcp
+      port: 8001
+      protocol: TCP

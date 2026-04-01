@@ -1,0 +1,35 @@
+spec:
+  containers:
+    - name: phoenix
+      image: /vss_db/vss_schema/vss_images/phoenix:version-8.12.1
+      env:
+        PHOENIX_WORKING_DIR: /.phoenix/
+      readinessProbe:
+        port: 6006
+        path: /healthz
+        initialDelaySeconds: 10
+        periodSeconds: 15
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "1"
+        limits:
+          memory: "2Gi"
+          cpu: "2"
+      volumeMounts:
+        - name: phoenix-data
+          mountPath: /.phoenix
+  volumes:
+    - name: phoenix-data
+      source: local
+      size: 10Gi
+  endpoints:
+    - name: ui
+      port: 6006
+      public: true
+    - name: otlp-grpc
+      port: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      protocol: TCP

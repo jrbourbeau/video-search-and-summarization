@@ -1,0 +1,118 @@
+# Snowpark Container Services spec for the VSS Agent.
+#
+# The VSS Agent is the core AI reasoning service. It uses remote NVIDIA API
+# endpoints for LLM and VLM inference (no local GPU required).
+#
+# Required environment variables resolved from deploy.sh at creation time:
+#   VST_INTERNAL_URL  - Internal SPCS DNS URL of the VST service
+#   VST_EXTERNAL_URL  - Public HTTPS URL of the VST service
+#   VST_MCP_URL       - Internal SPCS DNS URL of the VST MCP endpoint
+#   PHOENIX_ENDPOINT  - Internal SPCS DNS URL of the Phoenix service
+#   AGENT_EXTERNAL_URL - This service's own public HTTPS URL (set after first create)
+#
+# Config file is mounted from the @VSS_CONFIGS stage at /vss-agent/configs/config.yml
+
+spec:
+  containers:
+    - name: vss-agent
+      image: /vss_db/vss_schema/vss_images/vss-agent:3.1.0
+      command:
+        - serve
+        - --config_file
+        - /vss-agent/configs/config.yml
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8000"
+      env:
+        # --- Identity / networking ---
+        HOST_IP: vss-agent.vss-schema.vss-db.snowflakecomputing.internal
+        INTERNAL_IP: vss-agent.vss-schema.vss-db.snowflakecomputing.internal
+        EXTERNAL_IP: AGENT_EXTERNAL_URL_PLACEHOLDER
+        VSS_AGENT_HOST: 0.0.0.0
+        VSS_AGENT_PORT: "8000"
+        VSS_AGENT_VERSION: "3.1.0"
+        VSS_AGENT_CONFIG_FILE: /vss-agent/configs/config.yml
+        VSS_AGENT_OBJECT_STORE_TYPE: local_object_store
+        VSS_AGENT_REPORTS_BASE_URL: https://AGENT_EXTERNAL_URL_PLACEHOLDER/static/
+        VSS_AGENT_EXTERNAL_URL: https://AGENT_EXTERNAL_URL_PLACEHOLDER
+        # --- LLM / VLM (remote NVIDIA API) ---
+        LLM_MODE: remote
+        VLM_MODE: remote
+        LLM_MODEL_TYPE: nim
+        VLM_MODEL_TYPE: nim
+        LLM_NAME: nvidia/nvidia-nemotron-nano-9b-v2
+        VLM_NAME: nvidia/cosmos-reason2-8b
+        LLM_BASE_URL: https://integrate.api.nvidia.com
+        VLM_BASE_URL: https://integrate.api.nvidia.com
+        # --- VST ---
+        VST_BASE_URL: VST_INTERNAL_URL_PLACEHOLDER
+        VST_INTERNAL_URL: VST_INTERNAL_URL_PLACEHOLDER
+        VST_EXTERNAL_URL: VST_EXTERNAL_URL_PLACEHOLDER
+        VST_MCP_URL: VST_MCP_URL_PLACEHOLDER
+        # --- Phoenix telemetry ---
+        PHOENIX_ENDPOINT: PHOENIX_ENDPOINT_PLACEHOLDER
+        # --- RTVI / Elasticsearch (not used in base profile) ---
+        RTVI_EMBED_PORT: "8019"
+        RTVI_CV_PORT: "8018"
+        RTVI_VLM_BASE_URL: ""
+        VSS_ES_PORT: "9200"
+        ELASTIC_SEARCH_ENDPOINT: ""
+        ELASTIC_SEARCH_INDEX: ""
+        COSMOS_EMBED_ENDPOINT: ""
+        LVS_BACKEND_URL: ""
+        # --- Stream mode ---
+        STREAM_MODE: other
+        # --- Eval (unused in deployment) ---
+        EVAL_LLM_JUDGE_NAME: nvidia/nvidia-nemotron-nano-9b-v2
+        EVAL_LLM_JUDGE_BASE_URL: https://integrate.api.nvidia.com
+        EVAL_DIR: /vss-agent/agent_eval
+        DATASET_DIR: /vss-agent/agent_eval/dataset
+        DATASET_FILE_NAME: dataset_single_turn.json
+        EVAL_OUTPUT_DIR: /vss-agent/agent_eval/results
+        WEAVE_WORKFLOW_ALIAS: ""
+        WEAVE_PROJECT: ""
+        # --- Template paths (optional) ---
+        VSS_AGENT_TEMPLATE_PATH: ""
+        VSS_AGENT_TEMPLATE_NAME: ""
+        # --- HuggingFace (optional, for higher rate limits) ---
+        HF_TOKEN: ""
+      secrets:
+        - snowflakeSecret:
+            objectName: vss_db.vss_schema.nvidia_api_key
+          secretKeyRef: secret_string
+          envVarName: NVIDIA_API_KEY
+      readinessProbe:
+        port: 8000
+        path: /health
+        initialDelaySeconds: 30
+        periodSeconds: 15
+        failureThreshold: 16
+      resources:
+        requests:
+          memory: "8Gi"
+          cpu: "4"
+        limits:
+          memory: "16Gi"
+          cpu: "8"
+      volumeMounts:
+        - name: vss-configs
+          mountPath: /vss-agent/configs
+          subPath: vss-agent
+        - name: vss-agent-data
+          mountPath: /vss-agent/agent_eval
+
+  volumes:
+    - name: vss-configs
+      source: "@vss_db.vss_schema.vss_configs"
+    - name: vss-agent-data
+      source: local
+      size: 20Gi
+
+  endpoints:
+    - name: api
+      port: 8000
+      public: true
+
+  networkPolicyConfig:
+    allowInternetEgress: true
