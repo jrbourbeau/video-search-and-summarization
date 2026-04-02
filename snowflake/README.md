@@ -48,48 +48,60 @@ LLM and VLM inference is handled by [NVIDIA's hosted API](https://build.nvidia.c
 | [NGC API key](https://ngc.nvidia.com/) | For pulling NVIDIA container images from `nvcr.io` |
 | [NVIDIA API key](https://build.nvidia.com/) | For remote LLM/VLM inference at `integrate.api.nvidia.com` |
 
-## Quick Start
+## Deployment Options
 
-### 1. Configure your Snowflake CLI connection
+Two paths are available. Both require the same one-time image push step.
+
+### Option A — Snowflake Notebook (recommended)
+
+Everything after image pushing runs interactively in a browser — no local tooling required.
+
+**Step 1 (local, one-time):** Push container images to your Snowflake registry
 
 ```bash
-snow connection add
-# Follow the prompts to add your account, username, and authentication
-snow connection test --connection default
+export SNOWFLAKE_ACCOUNT=myorg-myaccount
+export NGC_CLI_API_KEY=<your-ngc-key>
+./snowflake/push-images.sh
 ```
 
-### 2. Set required environment variables
+**Step 2:** Import the notebook into Snowflake
+
+1. Open Snowflake → **Notebooks** → **+ Notebook** → **Import .ipynb**
+2. Convert `snowflake/deploy_notebook.py` to `.ipynb` first:
+   ```bash
+   pip install jupytext
+   jupytext --to notebook snowflake/deploy_notebook.py
+   ```
+   Then upload `deploy_notebook.ipynb`.
+3. In the notebook, open **Notebook settings → External access** and enable `VSS_GITHUB_ACCESS`
+   (created in cell 1 — re-run cell 1 first if the integration doesn't exist yet).
+4. Fill in `NVIDIA_API_KEY` in cell 0, then **Run All**.
+
+The notebook downloads configs from GitHub, deploys all services, and displays clickable URLs when done.
+
+---
+
+### Option B — CLI Scripts
 
 ```bash
-export SNOWFLAKE_ACCOUNT=myorg-myaccount   # Your Snowflake account identifier
-export NGC_CLI_API_KEY=<your-ngc-key>      # From https://ngc.nvidia.com/
-export NVIDIA_API_KEY=<your-nvidia-key>    # From https://build.nvidia.com/
-export SNOW_CONN=default                   # Your snow CLI connection name
-```
+export SNOWFLAKE_ACCOUNT=myorg-myaccount
+export NGC_CLI_API_KEY=<your-ngc-key>
+export NVIDIA_API_KEY=<your-nvidia-key>
+export SNOW_CONN=default
 
-### 3. Deploy
-
-```bash
-# From the repo root
 ./snowflake/deploy.sh --all
 ```
 
-This runs all four steps (setup → push images → upload configs → deploy services) sequentially. Total time is approximately 20–40 minutes, mostly waiting for NVIDIA images to pull and for SPCS nodes to provision.
+Runs all four steps (setup → push images → upload configs → deploy services) sequentially and prints the public URLs on completion.
 
-After completion the script prints the public URLs:
+For step-by-step control:
 
+```bash
+snow sql -f snowflake/setup.sql --connection default
+./snowflake/push-images.sh
+./snowflake/upload-configs.sh
+./snowflake/deploy.sh --services-only
 ```
-==================================================
-VSS Blueprint deployed successfully!
-==================================================
-
-  UI (frontend):    https://<hash>-myorg-myaccount.snowflakecomputing.app
-  Agent API:        https://<hash>-myorg-myaccount.snowflakecomputing.app
-  VST API:          https://<hash>-myorg-myaccount.snowflakecomputing.app/vst
-  Phoenix (traces): https://<hash>-myorg-myaccount.snowflakecomputing.app
-```
-
-Open the UI URL in your browser to start using the blueprint.
 
 ## Step-by-Step Deployment
 
@@ -118,12 +130,14 @@ SNOW_CONN=default ./snowflake/upload-configs.sh
 
 ```
 snowflake/
+├── deploy_notebook.py     # Snowflake Notebook — interactive deployment (recommended)
+│                          #   convert to .ipynb with: jupytext --to notebook deploy_notebook.py
 ├── setup.sql              # Snowflake objects: database, schema, compute pools,
 │                          #   image repository, stages, network rules, EAI, secrets, role
 ├── teardown.sql           # Drop all resources created by setup.sql
 ├── push-images.sh         # Pull images from nvcr.io/Docker Hub, push to Snowflake registry
-├── upload-configs.sh      # Upload config files to @VSS_CONFIGS stage
-├── deploy.sh              # Orchestrate end-to-end deployment
+├── upload-configs.sh      # Upload config files to @VSS_CONFIGS stage (used by CLI path)
+├── deploy.sh              # CLI orchestration — end-to-end deployment
 ├── configs/
 │   └── envoy-spcs.yaml    # Static Envoy proxy config for SPCS
 │                          #   (replaces the SDR-managed dynamic XDS config)
